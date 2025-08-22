@@ -32,7 +32,8 @@ import kotlinx.coroutines.launch
 import kotlin.math.atan2
 import kotlin.math.pow
 import kotlin.math.sqrt
-import kotlin.math.toDegrees
+// import java.lang.Math.toDegrees
+
 
 class MainActivity : ComponentActivity(), SensorEventListener {
 
@@ -134,13 +135,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             Text("Sent: ${lastSendUri ?: "-"}")
 
-            // osserva pitch/roll e aggiorna UI
-            LaunchedEffect(pitchDeg, rollDeg) {
-                uiPitch = pitchDeg
-                uiRoll = rollDeg
-                maybeSendRealtime()
-            }
-        }
+           }
     }
 
     override fun onResume() {
@@ -162,19 +157,27 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             ay = ay + alpha * (event.values[1] - ay)
             az = az + alpha * (event.values[2] - az)
 
-            // calcolo pitch/roll in gradi (convenzionale)
+            // calcolo pitch/roll in gradi
             val g = sqrt(ax * ax + ay * ay + az * az)
             val nx = ax / g; val ny = ay / g; val nz = az / g
 
-            // pitch: rotazione intorno all’asse X (telefono avanti/indietro)
-            val pitch = toDegrees(atan2(-nx.toDouble(), sqrt(ny.toDouble().pow(2) + nz.toDouble().pow(2))))
-            // roll : rotazione intorno all’asse Y (telefono sinistra/destra)
-            val roll  = toDegrees(atan2(ny.toDouble(), nz.toDouble()))
+            val pitch = Math.toDegrees(atan2(-nx.toDouble(), sqrt(ny.toDouble().pow(2) + nz.toDouble().pow(2))))
+            val roll  = Math.toDegrees(atan2(ny.toDouble(), nz.toDouble()))
 
             pitchDeg = pitch
             rollDeg  = roll
+
+            // (opzionale) aggiornare i testi UI qui:
+            // runOnUiThread {
+            //     // se in UI() usi remember { mutableStateOf(...) } per uiPitch/uiRoll,
+            //     // esponili come variabili dell'Activity e assegnale qui.
+            // }
+
+            // 👉 invio realtime GUIDATO DAL CAMBIO SENSORI
+            maybeSendRealtime()
         }
     }
+
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
