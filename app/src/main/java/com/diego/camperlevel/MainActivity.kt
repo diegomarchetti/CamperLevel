@@ -1,5 +1,7 @@
 package com.diego.camperlevel
 
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -12,18 +14,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,17 +27,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.diego.camperlevel.data.DataSender
+import com.diego.camperlevel.data.Prefs
 import com.diego.camperlevel.data.TiltData
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import java.lang.Math.toDegrees
-import kotlin.math.atan2
-import kotlin.math.pow
-import kotlin.math.sqrt
-import kotlin.math.abs
-import kotlin.math.min
+import kotlin.math.*
 
 class MainActivity : ComponentActivity(), SensorEventListener {
 
@@ -56,18 +42,22 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val alpha = 0.15f
     private var ax = 0f; private var ay = 0f; private var az = 0f
 
-    // gradi correnti
+    // gradi assoluti (non calibrati)
     private var pitchDeg = 0.0
     private var rollDeg  = 0.0
 
-    // UI state (mostrato a schermo)
-    private var uiPitch by mutableStateOf(0.0)
-    private var uiRoll  by mutableStateOf(0.0)
+    // offset persistenti
+    private lateinit var prefs: Prefs
+    private var pitch0 by mutableStateOf(0.0)
+    private var roll0  by mutableStateOf(0.0)
+
+    // delta mostrati e inviati
+    private var dPitch by mutableStateOf(0.0)
+    private var dRoll  by mutableStateOf(0.0)
 
     // invio in tempo reale
     private lateinit var sender: DataSender
     private var sendRealtimeEnabled = false
-    private val uiScope = CoroutineScope(Dispatchers.Main)
     private val ioScope = CoroutineScope(Dispatchers.IO)
     private var sendJob: Job? = null
     private var lastSentAtMs = 0L
@@ -76,25 +66,36 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val minIntervalMs = 100L
     private val minDeltaDeg   = 0.02
 
+    // calibrazione (UI state)
+    private var faceDownMode by mutableStateOf(false) // false = display su; true = display giù
+    private var isCalibrating by mutableStateOf(false)
+    private var countdown by mutableStateOf(0)
+
+    // beeper
+    private val beeper by lazy { ToneGenerator(AudioManager.STREAM_ALARM, 80) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // 🔒 schermo sempre acceso
+        // schermo sempre acceso
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
+        prefs = Prefs(this)
+        pitch0 = prefs.pitch0
+        roll0  = prefs.roll0
+
         sender = DataSender(this)
 
         setContent {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color(0xFF101010) // sfondo scuro
-                ) {
-                    UI()
-                }
+                    color = Color(0xFF101010)
+                ) { UI() }
             }
         }
     }
@@ -111,65 +112,130 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(
-                "Camper Level",
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold
-            )
+            Text("Camper Level", color = Color.White, fontWeight = FontWeight.SemiBold)
 
-            // Canvas quadrato con bolla
+            // Canvas bolla
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .aspectRatio(1f) // quadrato
+                    .aspectRatio(1f)
                     .background(Color(0xFF101010)),
                 contentAlignment = Alignment.Center
             ) {
                 LevelCanvas(
-                    pitch = uiPitch,
-                    roll = uiRoll,
+                    pitch = dPitch,
+                    roll = dRoll,
                     bubbleRadiusPx = 14.dp
                 )
             }
 
+            // valori Δ e offset correnti
             Text(
-                "ΔPitch: ${"%.2f".format(uiPitch)}°   ΔRoll: ${"%.2f".format(uiRoll)}°",
+                "ΔPitch: ${"%.2f".format(dPitch)}°   ΔRoll: ${"%.2f".format(dRoll)}°",
                 color = Color(0xFFEEEEEE)
             )
+            Text(
+                "Offset (pitch0=${"%.2f".format(pitch0)}°, roll0=${"%.2f".format(roll0)}°)",
+                color = Color(0xFF888888)
+            )
 
+            // Toggle invio realtime
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(
                     checked = uiSending,
                     onCheckedChange = { checked ->
                         uiSending = checked
                         sendRealtimeEnabled = checked
-                        if (checked) {
-                            Log.d("CamperLevel/Phone", "Realtime ON")
-                        } else {
-                            Log.d("CamperLevel/Phone", "Realtime OFF")
-                        }
+                        Log.d("CamperLevel/Phone", if (checked) "Realtime ON" else "Realtime OFF")
                     }
                 )
                 Text("  Invia Δ in tempo reale al Watch", color = Color.White)
             }
 
-            Button(onClick = {
-                // invio test manuale
-                ioScope.launch {
-                    try {
-                        val uri = sender.sendTilt(TiltData(pitchDeg, rollDeg))
-                        Log.d("CamperLevel/Phone", "Test send OK: $uri")
-                        uiScope.launch { lastSendUri = "ok $uri" }
-                    } catch (e: Exception) {
-                        Log.e("CamperLevel/Phone", "Test send FAIL: ${e.message}", e)
-                        uiScope.launch { lastSendUri = "ERR ${e.message}" }
+            // Modalità calibrazione (display su/giù)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(
+                    checked = faceDownMode,
+                    onCheckedChange = { checked ->
+                        faceDownMode = checked
                     }
-                }
-            }) {
-                Text("Invia TEST")
+                )
+                val modeText = if (faceDownMode) "Modalità: DISPLAY VERSO IL TAVOLO" else "Modalità: DISPLAY VERSO L’ALTO"
+                Text("  $modeText", color = Color.White)
             }
 
+            // Pulsante Calibra (immediata se display su, countdown se display giù)
+            Button(
+                enabled = !isCalibrating,
+                onClick = {
+                    if (faceDownMode) {
+                        startCountdownAndCalibrate()
+                    } else {
+                        // display verso l’alto → subito
+                        saveOffsets(pitchDeg, rollDeg)
+                        beepShort()
+                    }
+                }
+            ) {
+                Text(if (faceDownMode) "Calibrate (5s countdown)" else "Calibrate (immediata)")
+            }
+
+            // countdown visivo
+            if (isCalibrating) {
+                Text("Calibrazione tra: $countdown", color = Color(0xFFFFEE58))
+            }
+
+            // invio TEST manuale (invia Δ, non i grezzi)
+            Button(onClick = {
+                ioScope.launch {
+                    try {
+                        val uri = sender.sendTilt(TiltData(dPitch, dRoll))
+                        Log.d("CamperLevel/Phone", "Test send OK: $uri")
+                        withContext(Dispatchers.Main) { lastSendUri = "ok $uri" }
+                    } catch (e: Exception) {
+                        Log.e("CamperLevel/Phone", "Test send FAIL: ${e.message}", e)
+                        withContext(Dispatchers.Main) { lastSendUri = "ERR ${e.message}" }
+                    }
+                }
+            }) { Text("Invia TEST (Δ)") }
+
             Text("Sent: ${lastSendUri ?: "-"}", color = Color(0xFFAAAAAA))
+        }
+    }
+
+    private fun saveOffsets(pitch: Double, roll: Double) {
+        pitch0 = pitch
+        roll0  = roll
+        prefs.pitch0 = pitch0
+        prefs.roll0  = roll0
+        Log.d("CamperLevel/Phone", "Offset salvati: pitch0=$pitch0 roll0=$roll0")
+    }
+
+    private fun startCountdownAndCalibrate() {
+        if (isCalibrating) return
+        isCalibrating = true
+        countdown = 5
+        beepLong() // beep inizio
+        CoroutineScope(Dispatchers.Main).launch {
+            while (countdown > 0) {
+                delay(1000)
+                countdown--
+            }
+            // fine countdown → salva offset (display giù)
+            saveOffsets(pitchDeg, rollDeg)
+            beepDouble() // beep conferma
+            isCalibrating = false
+        }
+    }
+
+    // Beep helper
+    private fun beepShort() = beeper.startTone(ToneGenerator.TONE_PROP_ACK, 120)
+    private fun beepLong()  = beeper.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 250)
+    private fun beepDouble() {
+        beeper.startTone(ToneGenerator.TONE_PROP_ACK, 120)
+        CoroutineScope(Dispatchers.Main).launch {
+            delay(180)
+            beeper.startTone(ToneGenerator.TONE_PROP_ACK, 120)
         }
     }
 
@@ -187,7 +253,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val radius = min(w, h) * 0.45f
             val stroke = 3f
 
-            // cerchio esterno
+            // cerchio
             drawCircle(
                 color = Color(0xFF2A2A2A),
                 radius = radius,
@@ -211,18 +277,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 cap = StrokeCap.Round
             )
 
-            // mappatura gradi -> posizione
-            // ipotesi: 15° piena escursione fino al bordo
+            // mapping: ±15° → bordo
             val maxDeg = 15.0
-            val k = (radius - bubbleRadiusPx.toPx() - 6f).toFloat() // margine
+            val k = (radius - bubbleRadiusPx.toPx() - 6f).toFloat()
             val x = (roll / maxDeg).toFloat().coerceIn(-1f, 1f) * k
             val y = (pitch / maxDeg).toFloat().coerceIn(-1f, 1f) * k
 
-            // bolla
             drawCircle(
                 color = Color(0xFF00E676),
                 radius = bubbleRadiusPx.toPx(),
-                center = Offset(cx + x, cy - y) // pitch positivo = bolla su
+                center = Offset(cx + x, cy - y)
             )
         }
     }
@@ -239,7 +303,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         sensorManager.unregisterListener(this)
     }
 
-    override fun onSensorChanged(event: android.hardware.SensorEvent) {
+    override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
             // passa-basso
             ax = ax + alpha * (event.values[0] - ax)
@@ -250,20 +314,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val g = sqrt(ax * ax + ay * ay + az * az)
             val nx = ax / g; val ny = ay / g; val nz = az / g
 
-            // ✅ calcolo gradi per portrait:
-            // - pitch: avanti/indietro (usa NY)
-            // - roll : sinistra/destra (usa NX)
+            // calcolo gradi per portrait
             val pitch = toDegrees(atan2(ny.toDouble(), sqrt(nx.toDouble().pow(2) + nz.toDouble().pow(2))))
             val roll  = toDegrees(atan2(-nx.toDouble(), nz.toDouble()))
 
             pitchDeg = pitch
             rollDeg  = roll
 
-            // aggiorna testi/bolla
-            uiPitch = pitchDeg
-            uiRoll  = rollDeg
+            // aggiorna delta
+            dPitch = pitchDeg - pitch0
+            dRoll  = rollDeg  - roll0
 
-            // invio realtime pilotato dal sensore
+            // invio realtime (Δ)
             maybeSendRealtime()
         }
     }
@@ -272,23 +334,22 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private fun maybeSendRealtime() {
         if (!sendRealtimeEnabled) return
-
         val now = System.currentTimeMillis()
         if (now - lastSentAtMs < minIntervalMs) return
 
-        val dPitch = abs(pitchDeg - lastSentPitch)
-        val dRoll  = abs(rollDeg  - lastSentRoll)
-        if (dPitch < minDeltaDeg && dRoll < minDeltaDeg) return
+        val dP = abs(dPitch - lastSentPitch)
+        val dR = abs(dRoll  - lastSentRoll)
+        if (dP < minDeltaDeg && dR < minDeltaDeg) return
 
         lastSentAtMs = now
-        lastSentPitch = pitchDeg
-        lastSentRoll  = rollDeg
+        lastSentPitch = dPitch
+        lastSentRoll  = dRoll
 
         sendJob?.cancel()
         sendJob = ioScope.launch {
             try {
-                val uri = sender.sendTilt(TiltData(pitchDeg, rollDeg))
-                Log.d("CamperLevel/Phone", "RT Δ=(${String.format("%.2f", pitchDeg)}, ${String.format("%.2f", rollDeg)}) -> $uri")
+                val uri = sender.sendTilt(TiltData(dPitch, dRoll))
+                Log.d("CamperLevel/Phone", "RT Δ=(${String.format("%.2f", dPitch)}, ${String.format("%.2f", dRoll)}) -> $uri")
             } catch (e: Exception) {
                 Log.e("CamperLevel/Phone", "RT send FAIL: ${e.message}", e)
             }
