@@ -11,6 +11,7 @@
 
     <application
         android:label="Camper Level"
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:supportsRtl="true">
 

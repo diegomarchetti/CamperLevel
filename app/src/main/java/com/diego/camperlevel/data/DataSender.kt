@@ -1,44 +1,69 @@
 package com.diego.camperlevel.data
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
-import com.google.android.gms.wearable.PutDataMapRequest
+import com.google.android.gms.wearable.Node
 import com.google.android.gms.wearable.Wearable
 
-// Unica definizione di TiltData (assicurati di NON averla in altri file)
-data class TiltData(
-    val deltaPitch: Double,
-    val deltaRoll: Double
-)
+data class TiltData(val deltaPitch: Double, val deltaRoll: Double)
 
 class DataSender(private val context: Context) {
 
-    /**
-     * Invia i dati su /level/tilt.
-     * Aggiungo "nonce" per forzare TYPE_CHANGED a ogni invio.
-     * Risultato restituito via callback (niente coroutines).
-     */
-    fun sendTilt(
-        data: TiltData,
-        onResult: (String) -> Unit = {}
-    ) {
-        val req = PutDataMapRequest.create("/level/tilt").apply {
-            dataMap.putDouble("deltaPitch", data.deltaPitch)
-            dataMap.putDouble("deltaRoll",  data.deltaRoll)
-            dataMap.putLong("nonce", System.currentTimeMillis())
-        }.asPutDataRequest().setUrgent()
+    private val nodeClient = Wearable.getNodeClient(context)
+    private val messageClient = Wearable.getMessageClient(context)
 
-        val client = Wearable.getDataClient(context)
-        client.putDataItem(req)
-            .addOnSuccessListener { item ->
-                val uri = item.uri.toString()
-                Log.d("CamperLevel/Phone", "DataItem inviato: $uri")
-                onResult("Sent: ok $uri")
+    private val PATH_MSG = "/level/tilt_msg"
+    private val TAG = "CamperLevel/PhoneMsg"
+
+    // Throttling: max 20 Hz
+    private val minIntervalMs = 50L
+    private var lastSentNs = 0L
+
+    // (opzionale) piccola soglia per evitare spam quando quasi fermi
+    private val epsilonDeg = 0.01  // manda sempre se vuoi: metti 0.0
+    private var lastPitch = Double.NaN
+    private var lastRoll  = Double.NaN
+
+    fun sendTilt(data: TiltData, onResult: (String) -> Unit = {}) {
+        val nowNs = SystemClock.elapsedRealtimeNanos()
+        if ((nowNs - lastSentNs) < minIntervalMs * 1_000_000L) return
+
+        // Se il cambiamento è minuscolo, salta (toglimi se vuoi 1:1 assoluto)
+        if (!lastPitch.isNaN() && !lastRoll.isNaN()) {
+            if (kotlin.math.abs(data.deltaPitch - lastPitch) < epsilonDeg &&
+                kotlin.math.abs(data.deltaRoll  - lastRoll)  < epsilonDeg) {
+                lastSentNs = nowNs
+                return
             }
-            .addOnFailureListener { e ->
-                val msg = e.localizedMessage ?: "putDataItem failed"
-                Log.e("CamperLevel/Phone", "Errore invio: $msg", e)
-                onResult("Sent: ERR $msg")
+        }
+        lastPitch = data.deltaPitch
+        lastRoll  = data.deltaRoll
+        lastSentNs = nowNs
+
+        val payload = "${data.deltaPitch};${data.deltaRoll}".toByteArray()
+
+        nodeClient.connectedNodes
+            .addOnSuccessListener { nodes: List<Node> ->
+                if (nodes.isEmpty()) {
+                    onResult("Msg: no nodes")
+                    return@addOnSuccessListener
+                }
+                for (n in nodes) {
+                    messageClient.sendMessage(n.id, PATH_MSG, payload)
+                        .addOnSuccessListener {
+                            // Log leggero; commenta se troppo verboso
+                            Log.d(TAG, "Msg OK -> ${n.displayName} (${n.id.take(4)}…)  [${data.deltaPitch}, ${data.deltaRoll}]")
+                        }
+                        .addOnFailureListener { ex ->
+                            Log.e(TAG, "Msg FAIL -> ${n.displayName}: ${ex.message}", ex)
+                        }
+                }
+                onResult("Msg sent to ${nodes.size}")
+            }
+            .addOnFailureListener { ex ->
+                Log.e(TAG, "Nodes FAIL: ${ex.message}", ex)
+                onResult("Msg nodes err: ${ex.message}")
             }
     }
 }

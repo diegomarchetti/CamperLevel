@@ -1,5 +1,7 @@
 package com.diego.camperlevel
 
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -13,8 +15,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -28,6 +30,8 @@ import com.diego.camperlevel.data.DataSender
 import com.diego.camperlevel.data.Prefs
 import com.diego.camperlevel.data.SensorHandler
 import com.diego.camperlevel.data.TiltData
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.hypot
 import kotlin.math.min
 
@@ -43,53 +47,66 @@ class MainActivity : ComponentActivity() {
                 LevelScreen()
             }
         }
+
     }
 }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LevelScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    // --- Preferenze (pitch0/roll0 come Double) ---
+    // --- Preferenze (offset + orientamento display) ---
     val prefs = remember { Prefs(context) }
     var pitch0 by remember { mutableStateOf(prefs.pitch0) }
     var roll0  by remember { mutableStateOf(prefs.roll0) }
+    var faceDown by rememberSaveable { mutableStateOf(prefs.faceDown) } // false=▲ (su), true=▼ (giù)
 
     // --- Stato sensori (Double) ---
     var pitch by remember { mutableStateOf(0.0) }
     var roll  by remember { mutableStateOf(0.0) }
 
-    // --- Toggle display ▲/▼ (non persistito: se vuoi lo aggiungiamo a Prefs dopo) ---
-    var faceDown by rememberSaveable { mutableStateOf(false) } // false=▲, true=▼
-
     // --- Sender Data Layer ---
     val sender = remember { DataSender(context) }
     var sentStatus by remember { mutableStateOf("—") }
 
-    // --- Sensor handler con callback ---
+    // --- Tone generator per beep ---
+    val toneGen = remember { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100) }
+    DisposableEffect(Unit) { onDispose { toneGen.release() } }
+    fun beepShort() { @Suppress("DEPRECATION") toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 80) }
+    fun beepLong()  { @Suppress("DEPRECATION") toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 200) }
+
+    // --- Sensor handler: aggiorna Δ e invia sempre ---
     val sensor = remember {
         SensorHandler(context) { pDeg, rDeg ->
             pitch = pDeg
             roll  = rDeg
-
-            // Calcola Δ e invia sempre
             val dPitch = (pitch - pitch0)
             val dRoll  = (roll  - roll0)
-            sender.sendTilt(
-                TiltData(dPitch, dRoll)
-            ) { msg -> sentStatus = msg }
+            sender.sendTilt(TiltData(dPitch, dRoll)) { msg -> sentStatus = msg }
         }
     }
-
-    // Avvio/stop sensori legati al lifecycle del composable
     LaunchedEffect(Unit) { sensor.start() }
     DisposableEffect(Unit) { onDispose { sensor.stop() } }
 
     val dPitch = (pitch - pitch0)
     val dRoll  = (roll  - roll0)
 
+    var isCalibrating by remember { mutableStateOf(false) }
+    var showFlipHint by remember { mutableStateOf(false) } // label “gira il telefono” solo in ▼
+
+    // Helper calibrazione immediata
+    fun calibrateNow() {
+        pitch0 = pitch
+        roll0  = roll
+        prefs.pitch0 = pitch0
+        prefs.roll0  = roll0
+        beepLong()
+    }
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Camper Level") }) }
+         topBar = { TopAppBar(title = { Text("") }) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -97,10 +114,9 @@ private fun LevelScreen() {
                 .padding(padding)
                 .padding(horizontal = 20.dp)
         ) {
-            // Spazio extra sotto la AppBar per “staccare” il cerchio
             Spacer(Modifier.height(12.dp))
 
-            // Canvas livella centrato (quadrato)
+            // Canvas livella
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -109,20 +125,20 @@ private fun LevelScreen() {
             ) {
                 BubbleLevelCanvas(
                     pitch = dPitch.toFloat(),
-                    roll  = dRoll.toFloat()
+                    roll  = dRoll.toFloat(),
+                    faceDown = faceDown
                 )
             }
 
             Spacer(Modifier.height(16.dp))
 
-            // Letture Δ
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center
             ) {
-                Text("ΔPitch: ${formatDeg(dPitch)}°", fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Text("ΔPitch ↕: ${formatDeg(dPitch)}°", fontSize = 18.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.width(16.dp))
-                Text("ΔRoll: ${formatDeg(dRoll)}°",  fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Text("ΔRoll ↔: ${formatDeg(dRoll)}°",  fontSize = 18.sp, fontWeight = FontWeight.Medium)
             }
 
             Spacer(Modifier.height(6.dp))
@@ -135,14 +151,18 @@ private fun LevelScreen() {
 
             Spacer(Modifier.height(20.dp))
 
-            // Toggle modalità display (stessa riga, etichetta compatta)
+            // Toggle orientamento (persistente)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Switch(
+                    enabled = !isCalibrating,
                     checked = faceDown,
-                    onCheckedChange = { faceDown = it }
+                    onCheckedChange = {
+                        faceDown = it
+                        prefs.faceDown = it
+                    }
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(
@@ -152,22 +172,48 @@ private fun LevelScreen() {
                 )
             }
 
+            // Label di avviso durante la calibrazione in modalità ▼
+            if (faceDown && showFlipHint) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "Gira il telefono e appoggialo con il display verso il tavolo",
+                    color = Color(0xFF673AB7), // giallo ambra
+                    fontSize = 16.sp,
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                )
+            }
+
             Spacer(Modifier.height(16.dp))
 
-            // Calibrazione immediata (salva offset correnti)
+            // Calibrazione con countdown se ▼, altrimenti immediata
             Button(
+                enabled = !isCalibrating,
                 onClick = {
-                    // Nota: quando introdurremo il countdown+beep lo attiveremo solo se faceDown==true
-                    pitch0 = pitch
-                    roll0  = roll
-                    prefs.pitch0 = pitch0
-                    prefs.roll0  = roll0
+                    if (faceDown) {
+                        // Countdown 5s con beep + label di avviso
+                        scope.launch {
+                            isCalibrating = true
+                            showFlipHint = true
+                            beepShort() // start
+                            repeat(4) {
+                                delay(1000)
+                                beepShort()
+                            }
+                            delay(1000)      // raggiungi 5s
+                            calibrateNow()   // salva offset + beep lungo
+                            showFlipHint = false
+                            isCalibrating = false
+                        }
+                    } else {
+                        // Display su: calibrazione immediata + beep lungo
+                        calibrateNow()
+                    }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp)
             ) {
-                Text("Calibrate (immediata)")
+                Text(if (isCalibrating) "Calibrating..." else "Calibrate")
             }
 
             Spacer(Modifier.height(8.dp))
@@ -184,10 +230,11 @@ private fun LevelScreen() {
  * Canvas livella:
  * - cerchio con croce
  * - bolla verde vincolata all’interno del cerchio
+ * - inversione segni in modalità Display ▼ per mantenere lo stesso “senso” di movimento
  */
 @Composable
-private fun BubbleLevelCanvas(pitch: Float, roll: Float) {
-    val bubbleRadiusDp = 12.dp
+private fun BubbleLevelCanvas(pitch: Float, roll: Float, faceDown: Boolean) {
+    val bubbleRadiusDp = 20.dp
     val maxAngle = 45f // mappa ±45° al bordo, poi clamp
 
     Canvas(
@@ -223,10 +270,16 @@ private fun BubbleLevelCanvas(pitch: Float, roll: Float) {
             strokeWidth = gridStrokePx
         )
 
-        // Spostamento bolla (clamp e vincolo nel cerchio)
+        // Segni: ▲ = (-1, -1), ▼ = (+1, +1)
+        val signX = if (faceDown) +1f else -1f
+        val signY = if (faceDown) +1f else -1f
+
         val maxTravel = radius - bubbleRadiusPx
-        var dx = (roll.coerceIn(-maxAngle, maxAngle) / maxAngle) * maxTravel
-        var dy = -(pitch.coerceIn(-maxAngle, maxAngle) / maxAngle) * maxTravel // Y verso il basso → inverti
+        val pitchClamped = pitch.coerceIn(-maxAngle, maxAngle)
+        val rollClamped  = roll.coerceIn(-maxAngle, maxAngle)
+
+        var dx = signX * (pitchClamped / maxAngle) * maxTravel   // sinistra/destra
+        var dy = signY * (rollClamped  / maxAngle) * maxTravel   // su/giù
 
         val dist = hypot(dx, dy)
         if (dist > maxTravel) {

@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.diego.camperlevel.wear"
+    namespace = "com.diego.camperlevel"
     compileSdk = 35
 
     defaultConfig {

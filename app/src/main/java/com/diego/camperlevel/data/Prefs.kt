@@ -14,4 +14,9 @@ class Prefs(context: Context) {
     var roll0: Double
         get() = java.lang.Double.longBitsToDouble(sp.getLong("roll0", 0L))
         set(value) = sp.edit().putLong("roll0", java.lang.Double.doubleToRawLongBits(value)).apply()
+
+    // Nuovo: persistenza orientamento display
+    var faceDown: Boolean
+        get() = sp.getBoolean("faceDown", false) // false = ▲ (display su, default)
+        set(value) = sp.edit().putBoolean("faceDown", value).apply()
 }
